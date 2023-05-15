@@ -18,9 +18,13 @@ package controllers
 
 import (
 	"context"
+	"fmt"
+	"time"
 
+	v1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -60,11 +64,53 @@ func (r *ScalerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 			log.Info("Scaler resource not found. Ignoring since object must be deleted")
 			return ctrl.Result{}, nil
 		}
+		log.Error(err, "Failed")
+		return ctrl.Result{}, err
 	}
 
-	// TODO(user): your logic here
+	startTime := scaler.Spec.Start
+	endTime := scaler.Spec.End
 
-	return ctrl.Result{}, nil
+	// current time in UTC
+	currentHour := time.Now().UTC().Hour()
+	log.Info(fmt.Sprintf("current time in hour: %d\n", currentHour))
+
+	if currentHour >= startTime && currentHour <= endTime {
+		log.Info("Scaling deployment")
+		if err = scalerDeployment(scaler, r, ctx, int32(scaler.Spec.Replicas)); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	return ctrl.Result{RequeueAfter: time.Duration(30 * time.Second)}, nil
+}
+
+func scalerDeployment(scaler *apiv1alpha1.Scaler, r *ScalerReconciler, ctx context.Context, replicas int32) error {
+	for _, deploy := range scaler.Spec.Deployments {
+		dep := &v1.Deployment{}
+		err := r.Get(ctx, types.NamespacedName{
+			Namespace: deploy.Namespace,
+			Name:      deploy.Name,
+		}, dep)
+		if err != nil {
+			return err
+		}
+
+		if dep.Spec.Replicas != &replicas {
+			dep.Spec.Replicas = &replicas
+			err := r.Update(ctx, dep)
+			if err != nil {
+				scaler.Status.Status = apiv1alpha1.FAILED
+				return err
+			}
+			scaler.Status.Status = apiv1alpha1.SUCCESS
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+
 }
 
 // SetupWithManager sets up the controller with the Manager.
